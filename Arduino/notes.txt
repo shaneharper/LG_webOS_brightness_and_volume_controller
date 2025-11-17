@@ -1,0 +1,3 @@
+map() from math.h isn't used because it uses integer math and it might return inaccurate results, e.g. out_max not output when x equals in_max.
+
+constrain() from math.h isn't used because it's a macro; https://docs.arduino.cc/language-reference/en/functions/math/constrain/ warns that it may return incorrect results if any of its arguments make a function call.

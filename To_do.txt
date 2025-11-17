@@ -1,0 +1,84 @@
+- Use pots which include a button.
+    The button could, for example, toggle whether sound output is muted or not.
+    https://core-electronics.com.au/panel-mount-10k-log-potentiometer-w-on-off-switch-10k-log-w-switch.html
+    amazon.com (in the USA not in Australia) sells pots with switches.
+
+- Windows: Automatically reopen the COM port if comms fails due to the hardware being disconnected.
+
+- Windows: Automatically determine the COM port to use (don't hard-code it). Copilot suggested:
+    #include <windows.h>
+    #include <setupapi.h>
+    #include <devguid.h>
+    #include <regstr.h>
+    #include <iostream>
+    #include <string>
+    #include <regex>
+
+    #pragma comment(lib, "setupapi.lib")
+
+    // Helper: extract VID/PID from device ID string
+    bool extractVidPid(const std::wstring& deviceID, unsigned& vid, unsigned& pid) {
+        size_t vidPos = deviceID.find(L"VID_");
+        size_t pidPos = deviceID.find(L"PID_");
+        if (vidPos == std::wstring::npos || pidPos == std::wstring::npos)
+            return false;
+
+        vid = std::stoi(deviceID.substr(vidPos + 4, 4), nullptr, 16);
+        pid = std::stoi(deviceID.substr(pidPos + 4, 4), nullptr, 16);
+        return true;
+    }
+
+    // Helper: extract COM port from friendly name string
+    std::wstring extractComPort(const std::wstring& friendlyName) {
+        std::wregex comRegex(L"(COM\\d+)");
+        std::wsmatch match;
+        if (std::regex_search(friendlyName, match, comRegex)) {
+            return match.str(0); // e.g. "COM5"
+        }
+        return L"";
+    }
+
+    int main() {
+        HDEVINFO hDevInfo = SetupDiGetClassDevs(
+            &GUID_DEVCLASS_PORTS, 0, 0, DIGCF_PRESENT);
+
+        if (hDevInfo == INVALID_HANDLE_VALUE) {
+            std::cerr << "Error: SetupDiGetClassDevs failed\n";
+            return 1;
+        }
+
+        SP_DEVINFO_DATA devInfoData;
+        devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+        for (DWORD i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devInfoData); i++) {
+            wchar_t deviceInstanceID[MAX_DEVICE_ID_LEN];
+            if (CM_Get_Device_IDW(devInfoData.DevInst, deviceInstanceID,
+                                MAX_DEVICE_ID_LEN, 0) != CR_SUCCESS) {
+                continue;
+            }
+
+            unsigned vid = 0, pid = 0;
+            if (extractVidPid(deviceInstanceID, vid, pid)) {
+                if ((vid == 0x0403 && pid == 0x6001) || // FTDI Nano
+                    (vid == 0x1A86 && pid == 0x7523)) { // CH340 Nano
+
+                    wchar_t friendlyName[256];
+                    if (SetupDiGetDeviceRegistryPropertyW(
+                            hDevInfo, &devInfoData, SPDRP_FRIENDLYNAME,
+                            NULL, (PBYTE)friendlyName,
+                            sizeof(friendlyName), NULL)) {
+
+                        std::wstring comPort = extractComPort(friendlyName);
+                        if (!comPort.empty()) {
+                            std::wcout << L"Arduino Nano COM port: " << comPort << L"\n";
+                        }
+                    }
+                }
+            }
+        }
+
+        SetupDiDestroyDeviceInfoList(hDevInfo);
+        return 0;
+    }
+
+    Additionally, there should be a handshake between the PC and the Arduino Nano to confirm that the Arduino Nano is running the expected software.

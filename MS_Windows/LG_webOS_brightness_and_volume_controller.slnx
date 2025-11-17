@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="LG_webOS_brightness_and_volume_controller.vcxproj" Id="c9293200-00f1-479f-9ab5-3bc0577eff42" />
+</Solution>
