@@ -20,8 +20,8 @@ The board, COM port, and processor need to be set in [Arduino IDE](https://docs.
 
 ### MS Windows
 
-- Install [LGTV Companion](https://github.com/JPersson77/LGTVCompanion).</br>
-I originally installed [LGTV Companion](https://github.com/JPersson77/LGTVCompanion) on my PC to turn my screen on when I logged in (via Windows Hello) and to turn it off when the PC was shut down or went to sleep.
+- Install [LGTV Companion](https://github.com/JPersson77/LGTVCompanion).<br>
+  I originally installed [LGTV Companion](https://github.com/JPersson77/LGTVCompanion) on my PC to turn my screen on when I logged in (via Windows Hello) and to turn it off when the PC was shut down or went to sleep.
 - Compile. Note that the COM port is hard-coded in [main.c++](MS_Windows/main.c++).
 - The utility can be run on system start-up by starting "Task Scheduler" and adding a task ("Action/Create Basic Task...").
 
