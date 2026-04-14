@@ -32,7 +32,7 @@ I used an Arduino Nano with an ATmega168 processor.
 
 The brightness potentiometer's wiper is connected to `A0` on the Arduino Nano. `A1` is used for volume.
 
-100kΩ potentiometers were used. (10kΩ potentiometers may have been better as they may have resulted in less "jitter" from the A-to-Ds?)
+100kΩ potentiometers were used. (10kΩ potentiometers may have been better as they may have resulted in less "jitter" from the ADCs?)
 
 The dimensions of the plastic box are 60x36x25mm. A small L-shape piece of plywood holds the Arduino Nano firmly in place. 
 
