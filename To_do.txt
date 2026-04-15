@@ -82,3 +82,6 @@
     }
 
     Additionally, there should be a handshake between the PC and the Arduino Nano to confirm that the Arduino Nano is running the expected software.
+
+- Ensure that the display brightness is set correctly when the input changes between HDR and non-HDR.
+  Note that the LG C2 records individual brightness levels for HDR and non-HDR inputs. The Windows app should resend the brightness level whenever Windows changes between using HDR / non-HDR.
