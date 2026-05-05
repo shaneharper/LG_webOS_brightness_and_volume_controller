@@ -35,7 +35,7 @@ static void run_command(const std::string& command_line)
 static void set_brightness(const std::string& s)  // XXX XXX This should be ...(unsigned percent)
 {
     run_command(LGTV_COMPANION_PATHNAME " --backlight "  // "--backlight" sets the brightness even on an OLED display which won't have a backlight.
-        + s);  
+        + s);
 }
 
 static void set_volume(const std::string& s)  // XXX XXX This should be ...(unsigned percent)
@@ -51,7 +51,7 @@ struct AutoHANDLE
     ~AutoHANDLE() { close(); }
 
 
-    AutoHANDLE(AutoHANDLE&& o) noexcept : handle(o.handle) 
+    AutoHANDLE(AutoHANDLE&& o) noexcept : handle(o.handle)
     {
         o.handle = INVALID_HANDLE_VALUE;
     }
@@ -67,7 +67,7 @@ private:
 
     void close() noexcept
     {
-        if (handle != INVALID_HANDLE_VALUE) 
+        if (handle != INVALID_HANDLE_VALUE)
         {
             CloseHandle(handle);
             handle = INVALID_HANDLE_VALUE;
