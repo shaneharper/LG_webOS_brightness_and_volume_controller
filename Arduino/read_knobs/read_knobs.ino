@@ -35,4 +35,13 @@ void loop()
   }
 
   delay(150);
+
+  while (Serial.available() > 0)
+  {
+    if (Serial.read() == '?')
+    {
+      Serial << "b" << brightness << "\n"
+             << "v" << volume << "\n";
+    }
+  }
 }
