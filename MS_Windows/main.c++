@@ -24,7 +24,7 @@ static void run_command(const std::string& command_line)
         nullptr,     // Current directory
         &startup_info, &process_info))
     {
-        std::cerr << "CreateProcess() failed with error " << GetLastError() << std::endl;
+        std::cerr << "CreateProcess() failed with error " << GetLastError() << '.' << std::endl;
         return;
     }
 
@@ -112,12 +112,12 @@ static void apply_9600_8N1(HANDLE port)
 {
     DCB dcb = { 0 };
     dcb.DCBlength = sizeof(dcb);
-    if (!GetCommState(port, &dcb)) throw "GetCommState() failed";
+    if (!GetCommState(port, &dcb)) throw "GetCommState() failed.";
     dcb.BaudRate = CBR_9600;
     dcb.ByteSize = 8;
     dcb.StopBits = ONESTOPBIT;
     dcb.Parity = NOPARITY;
-    if (!SetCommState(port, &dcb)) throw "SetCommState() failed";
+    if (!SetCommState(port, &dcb)) throw "SetCommState() failed.";
 }
 
 static void apply_short_read_timeouts(HANDLE port)
@@ -126,7 +126,7 @@ static void apply_short_read_timeouts(HANDLE port)
     timeouts.ReadIntervalTimeout = 50;
     timeouts.ReadTotalTimeoutConstant = 50;
     timeouts.ReadTotalTimeoutMultiplier = 10;
-    if (!SetCommTimeouts(port, &timeouts)) throw "SetCommTimeouts() failed";
+    if (!SetCommTimeouts(port, &timeouts)) throw "SetCommTimeouts() failed.";
 }
 
 static AutoHANDLE try_open_COM_port(const std::string& port_name)
@@ -145,7 +145,7 @@ static AutoHANDLE try_open_COM_port(const std::string& port_name)
     catch (const char* e)
     {
         const auto win32_error = GetLastError();
-        std::cerr << "Failed to configure " << port_name << ": " << e << " (Win32 error " << win32_error << ")\n";
+        std::cerr << "Failed to configure " << port_name << ": " << e << " (Win32 error " << win32_error << ").\n";
         return AutoHANDLE(INVALID_HANDLE_VALUE);
     }
     return port;
@@ -157,7 +157,7 @@ static void send_query(HANDLE COM_port)
     DWORD bytes_written;
     if (!WriteFile(COM_port, &query, 1, &bytes_written, nullptr))
     {
-        std::cerr << "WriteFile() failed. Error=" << GetLastError() << '\n';
+        std::cerr << "WriteFile() failed. Error=" << GetLastError() << ".\n";
     }
 }
 
@@ -195,7 +195,7 @@ static bool COM_port_appears_to_be_arduino(HANDLE port)
 static AutoHANDLE open_COM_port()
 {
     const auto port_names = enumerate_COM_ports();
-    if (port_names.empty()) throw "No COM ports were found";
+    if (port_names.empty()) throw "No COM ports were found.";
 
     for (const auto& port_name : port_names)
     {
@@ -204,12 +204,12 @@ static AutoHANDLE open_COM_port()
         if (port.get() == INVALID_HANDLE_VALUE) continue;
         if (COM_port_appears_to_be_arduino(port.get()))
         {
-            std::cout << "Connected to Arduino on " << port_name << '\n';
+            std::cout << "Connected to Arduino on " << port_name << ".\n";
             return port;
         }
     }
 
-    throw "Failed to find an Arduino on any COM port";
+    throw "Failed to find an Arduino on any COM port.";
 }
 
 namespace
