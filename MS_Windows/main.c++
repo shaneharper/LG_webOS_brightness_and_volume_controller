@@ -1,6 +1,6 @@
 // This program receives messages sent on a COM port from a device with a brightness knob and a volume knob and it forwards requests to change brightness/volume to "LGTV Companion" (https://github.com/JPersson77/LGTVCompanion).
 
-#include <iostream>
+#include <cwchar>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -24,7 +24,7 @@ static void run_command(const std::string& command_line)
         nullptr,     // Current directory
         &startup_info, &process_info))
     {
-        std::cerr << "CreateProcess() failed with error " << GetLastError() << '.' << std::endl;
+        // XXX std::cerr << "CreateProcess() failed with error " << GetLastError() << '.' << std::endl;
         return;
     }
 
@@ -142,10 +142,10 @@ static AutoHANDLE try_open_COM_port(const std::string& port_name)
         apply_9600_8N1(port.get());
         apply_short_read_timeouts(port.get());
     }
-    catch (const char* e)
+    catch (const char*)
     {
-        const auto win32_error = GetLastError();
-        std::cerr << "Failed to configure " << port_name << ": " << e << " (Win32 error " << win32_error << ").\n";
+        // XXX const auto win32_error = GetLastError();
+        // XXX std::cerr << "Failed to configure " << port_name << ": " << e << " (Win32 error " << win32_error << ").\n";
         return AutoHANDLE(INVALID_HANDLE_VALUE);
     }
     return port;
@@ -157,7 +157,7 @@ static void send_query(HANDLE COM_port)
     DWORD bytes_written;
     if (!WriteFile(COM_port, &query, 1, &bytes_written, nullptr))
     {
-        std::cerr << "WriteFile() failed. Error=" << GetLastError() << ".\n";
+        // XXX std::cerr << "WriteFile() failed. Error=" << GetLastError() << ".\n";
     }
 }
 
@@ -192,19 +192,18 @@ static bool COM_port_appears_to_be_arduino(HANDLE port)
     return false;
 }
 
-static AutoHANDLE open_COM_port()
+static AutoHANDLE open_COM_port(std::string& out_port_name)
 {
     const auto port_names = enumerate_COM_ports();
     if (port_names.empty()) throw "No COM ports were found.";
 
     for (const auto& port_name : port_names)
     {
-        std::cout << "Probing " << port_name << "...\n";
         auto port = try_open_COM_port(port_name);
         if (port.get() == INVALID_HANDLE_VALUE) continue;
         if (COM_port_appears_to_be_arduino(port.get()))
         {
-            std::cout << "Connected to Arduino on " << port_name << ".\n";
+            out_port_name = port_name;
             return port;
         }
     }
@@ -217,7 +216,22 @@ namespace
     HANDLE active_COM_port = INVALID_HANDLE_VALUE;
     std::mutex active_COM_port_mutex;
     bool last_HDR_state_seen = false;  // only touched by the system-event thread
+
+    HWND main_window = nullptr;
+    UINT taskbar_created_message = 0;
+
+    std::mutex tray_state_mutex;
+    std::string connected_port_name;       // empty => not connected
+    int last_brightness_percent = -1;      // -1 => not yet received
+    int last_volume_percent = -1;
+
+    HICON tray_icon = nullptr;
 }
+
+constexpr UINT WM_APP_TRAY_ICON         = WM_APP + 1;
+constexpr UINT WM_APP_REFRESH_TOOLTIP   = WM_APP + 2;
+constexpr UINT TRAY_ICON_ID             = 1;
+constexpr UINT IDM_EXIT                 = 1001;
 
 static void send_query_to_active_COM_port()
 {
@@ -286,8 +300,140 @@ static void resend_brightness_if_HDR_changed()
     }
 }
 
+static std::wstring build_tooltip_text()
+{
+    std::lock_guard lock(tray_state_mutex);
+
+    std::wstring tip;
+    if (connected_port_name.empty())
+    {
+        tip = L"Not connected.";
+    }
+    else
+    {
+        tip.assign(connected_port_name.begin(), connected_port_name.end());
+    }
+    tip += L"\nBrightness: ";
+    tip += (last_brightness_percent < 0) ? L"-" : (std::to_wstring(last_brightness_percent) + L"%");
+    tip += L", Volume: ";
+    tip += (last_volume_percent < 0) ? L"-" : (std::to_wstring(last_volume_percent) + L"%");
+    return tip;
+}
+
+static NOTIFYICONDATAW make_nid()
+{
+    NOTIFYICONDATAW nid = { sizeof(NOTIFYICONDATAW) };
+    nid.hWnd = main_window;
+    nid.uID = TRAY_ICON_ID;
+    return nid;
+}
+
+static void copy_tooltip_into(NOTIFYICONDATAW& nid)
+{
+    auto tip = build_tooltip_text();
+    if (tip.size() >= ARRAYSIZE(nid.szTip)) tip.resize(ARRAYSIZE(nid.szTip) - 1);
+    wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
+}
+
+// Generate a tray icon at runtime: bold white "LG" on a solid black background. Drawing it with GDI
+// avoids shipping a separate .ico resource and the size automatically tracks SM_CXSMICON/SM_CYSMICON.
+static HICON create_LG_icon()
+{
+    const int cx = GetSystemMetrics(SM_CXSMICON);
+    const int cy = GetSystemMetrics(SM_CYSMICON);
+
+    HDC mem_dc = CreateCompatibleDC(nullptr);
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = cx;
+    bmi.bmiHeader.biHeight = cy;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* color_bits = nullptr;
+    HBITMAP color_bitmap = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &color_bits, nullptr, 0);
+    HBITMAP old_bitmap = static_cast<HBITMAP>(SelectObject(mem_dc, color_bitmap));
+
+    HFONT font = CreateFontW(
+        -(cy - 4),                                 // negative => character height in pixels
+        0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        ANTIALIASED_QUALITY,                       // grayscale AA so RGB stays equal at the edges
+        DEFAULT_PITCH | FF_SWISS,
+        L"Segoe UI");
+    HFONT old_font = static_cast<HFONT>(SelectObject(mem_dc, font));
+
+    SetBkMode(mem_dc, TRANSPARENT);
+    SetTextColor(mem_dc, RGB(255, 255, 255));
+    RECT rect = { 1, 1, cx-2, cy-2 };
+    DrawTextW(mem_dc, L"LG", 2, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    SelectObject(mem_dc, old_font);
+    SelectObject(mem_dc, old_bitmap);
+    DeleteObject(font);
+    DeleteDC(mem_dc);
+
+    // The DIB starts zeroed (black) and GDI text drawing leaves alpha at 0; force every pixel
+    // fully opaque so the entire icon renders as white "LG" on a solid black square.
+    auto* pixels = static_cast<uint32_t*>(color_bits);
+    for (int i = 0; i < cx * cy; ++i) pixels[i] |= 0xFF000000u;
+
+    // 1bpp AND mask, all zero. With a 32bpp color bitmap the alpha channel governs blending.
+    const SIZE_T mask_stride = ((cx + 15) / 16) * 2;
+    std::vector<BYTE> mask_bits(mask_stride * cy, 0);
+    HBITMAP mask_bitmap = CreateBitmap(cx, cy, 1, 1, mask_bits.data());
+
+    ICONINFO icon_info = {};
+    icon_info.fIcon = TRUE;
+    icon_info.hbmMask = mask_bitmap;
+    icon_info.hbmColor = color_bitmap;
+    HICON icon = CreateIconIndirect(&icon_info);
+
+    DeleteObject(color_bitmap);
+    DeleteObject(mask_bitmap);
+    return icon;
+}
+
+static void add_tray_icon()
+{
+    NOTIFYICONDATAW nid = make_nid();
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_APP_TRAY_ICON;
+    nid.hIcon = tray_icon;
+    copy_tooltip_into(nid);
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+static void update_tray_tooltip()
+{
+    NOTIFYICONDATAW nid = make_nid();
+    nid.uFlags = NIF_TIP;
+    copy_tooltip_into(nid);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+static void remove_tray_icon()
+{
+    NOTIFYICONDATAW nid = make_nid();
+    Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+static void show_tray_context_menu()
+{
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, IDM_EXIT, L"Exit");
+    POINT pt;
+    GetCursorPos(&pt);
+    // SetForegroundWindow before TrackPopupMenu so the menu dismisses correctly when focus is lost.
+    SetForegroundWindow(main_window);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, main_window, nullptr);
+    DestroyMenu(menu);
+}
+
 // This window receives system events that should trigger us to push current brightness/volume to
-// the TV again:
+// the TV again, and also hosts the notification-area icon's callback messages.
 //
 //   PBT_APMRESUMEAUTOMATIC: PC has resumed from sleep. See "Why might USB resume not reset the
 //     Arduino" below for why a query is needed.
@@ -305,7 +451,7 @@ static void resend_brightness_if_HDR_changed()
 // on resume and the driver re-asserts DTR from scratch, the resulting edge resets the Arduino; the
 // sketch restarts and emits fresh values on its first loop iteration, making the resume query
 // redundant.
-static LRESULT CALLBACK system_event_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+static LRESULT CALLBACK main_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     switch (msg)
     {
@@ -321,31 +467,32 @@ static LRESULT CALLBACK system_event_wndproc(HWND hwnd, UINT msg, WPARAM wparam,
             if (lparam && wcscmp(reinterpret_cast<LPCWSTR>(lparam), L"ImmersiveColorSet") == 0)
                 resend_brightness_if_HDR_changed();
             break;
+
+        case WM_APP_TRAY_ICON:
+            if (LOWORD(lparam) == WM_RBUTTONUP || LOWORD(lparam) == WM_CONTEXTMENU)
+                show_tray_context_menu();
+            break;
+
+        case WM_APP_REFRESH_TOOLTIP:
+            update_tray_tooltip();
+            break;
+
+        case WM_COMMAND:
+            if (LOWORD(wparam) == IDM_EXIT) DestroyWindow(hwnd);
+            break;
+
+        case WM_DESTROY:
+            remove_tray_icon();
+            if (tray_icon) { DestroyIcon(tray_icon); tray_icon = nullptr; }
+            PostQuitMessage(0);
+            break;
+
+        default:
+            // Re-add the icon if Explorer restarts.
+            if (msg == taskbar_created_message) add_tray_icon();
+            break;
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
-}
-
-static void run_system_event_loop()
-{
-    WNDCLASSEXW wc = { sizeof(wc) };
-    wc.lpfnWndProc = system_event_wndproc;
-    wc.lpszClassName = L"LGwebOSBrightnessVolumeSystemEvents";
-    wc.hInstance = GetModuleHandleW(nullptr);
-    RegisterClassExW(&wc);
-
-    // Top-level (parent = nullptr) rather than HWND_MESSAGE so the window receives broadcast messages
-    // such as WM_SETTINGCHANGE. The window has no WS_VISIBLE style and is never shown.
-    CreateWindowExW(0, wc.lpszClassName, nullptr, 0,
-                    0, 0, 0, 0, nullptr, nullptr, wc.hInstance, nullptr);
-
-    last_HDR_state_seen = is_HDR_enabled();
-
-    MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
-    {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
-    }
 }
 
 static std::string read_line(const AutoHANDLE& COM_port)
@@ -373,21 +520,46 @@ static std::string read_line(const AutoHANDLE& COM_port)
     }
 }
 
+static int parse_percent(const std::string& s)
+{
+    try { return std::stoi(s); }
+    catch (...) { return -1; }
+}
+
 static void dispatch_arduino_message(const std::string& line)
 {
     if (line.starts_with('b'))
     {
-        set_brightness(line.substr(1));
+        const auto value = line.substr(1);
+        {
+            std::lock_guard lock(tray_state_mutex);
+            last_brightness_percent = parse_percent(value);
+        }
+        PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
+        set_brightness(value);
     }
     else if (line.starts_with('v'))
     {
-        set_volume(line.substr(1));
+        const auto value = line.substr(1);
+        {
+            std::lock_guard lock(tray_state_mutex);
+            last_volume_percent = parse_percent(value);
+        }
+        PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
+        set_volume(value);
     }
 }
 
 static void run_arduino_session()
 {
-    const auto COM_port = open_COM_port();
+    std::string port_name;
+    const auto COM_port = open_COM_port(port_name);
+    {
+        std::lock_guard lock(tray_state_mutex);
+        connected_port_name = port_name;
+    }
+    PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
+
     ScopedActiveCOMPort active_port(COM_port.get());
 
     send_query(COM_port.get());
@@ -395,25 +567,63 @@ static void run_arduino_session()
     for (;;)
     {
         auto line = read_line(COM_port);
-        std::cout << line << '\n';
         dispatch_arduino_message(line);
     }
 }
 
-int main()
+static void run_arduino_loop()
 {
-    std::thread(run_system_event_loop).detach();
-
     for (;;)
     {
         try
         {
             run_arduino_session();
         }
-        catch (const char* e)
+        catch (const char*)
         {
-            std::cerr << e << '\n';
+            // XXX std::cerr << e << '\n';
         }
+
+        {
+            std::lock_guard lock(tray_state_mutex);
+            connected_port_name.clear();
+        }
+        PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
+
         Sleep(2000);
     }
+}
+
+int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
+                      _In_opt_ HINSTANCE /*hPrevInstance*/,
+                      _In_ LPWSTR /*lpCmdLine*/,
+                      _In_ int /*nShowCmd*/)
+{
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = main_wndproc;
+    wc.lpszClassName = L"LGwebOSBrightnessVolumeSystemEvents";
+    wc.hInstance = hInstance;
+    RegisterClassExW(&wc);
+
+    // Top-level (parent = nullptr) rather than HWND_MESSAGE so the window receives broadcast messages
+    // such as WM_SETTINGCHANGE. The window has no WS_VISIBLE style and is never shown.
+    main_window = CreateWindowExW(0, wc.lpszClassName, nullptr, 0,
+                                  0, 0, 0, 0, nullptr, nullptr, hInstance, nullptr);
+    if (!main_window) return 1;
+
+    taskbar_created_message = RegisterWindowMessageW(L"TaskbarCreated");
+    last_HDR_state_seen = is_HDR_enabled();
+
+    tray_icon = create_LG_icon();
+    add_tray_icon();
+
+    std::thread(run_arduino_loop).detach();
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return 0;
 }
