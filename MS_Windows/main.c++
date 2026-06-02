@@ -6,6 +6,9 @@
 #include <thread>
 #include <vector>
 #include <windows.h>
+#include <setupapi.h>
+#include <devguid.h>
+#pragma comment(lib, "setupapi.lib")
 
 
 static void run_command(const std::string& command_line)
@@ -76,35 +79,83 @@ private:
     }
 };
 
-static std::vector<std::string> enumerate_COM_ports()
+struct AutoHKEY
+{
+    explicit AutoHKEY(HKEY key) noexcept : key(key) {}
+    ~AutoHKEY() { if (*this) RegCloseKey(key); }
+
+    AutoHKEY(const AutoHKEY&) = delete;
+    AutoHKEY& operator=(const AutoHKEY&) = delete;
+
+    explicit operator bool() const noexcept { return key != INVALID_HANDLE_VALUE; }
+    HKEY get() const noexcept { return key; }
+
+private:
+    HKEY key;
+};
+
+static bool hardware_id_could_be_arduino(const std::string& hardware_id)
+{
+    for (const auto* fragment : {
+        "VID_1A86&PID_7523",  // CH340 (cheap Nano clones; also used by many ESP32 dev boards)
+        "VID_0403&PID_6001",  // FTDI FT232R (older genuine Nanos; also generic FTDI USB-serial cables)
+        "VID_2341",           // Arduino LLC (any PID - covers official boards using ATmega16U2)
+        "VID_2A03",           // Arduino SA (any PID - the post-2015 official VID)
+    })
+        if (hardware_id.find(fragment) != std::string::npos) return true;
+    return false;
+}
+
+static std::string read_device_hardware_id(HDEVINFO devs, const SP_DEVINFO_DATA& dev)
+{
+    // SPDRP_HARDWAREID is a REG_MULTI_SZ (a sequence of null-terminated
+    // strings); the std::string constructor stops at the first '\0', which is
+    // exactly the substring (e.g. "USB\VID_1A86&PID_7523&REV_0254") we want to
+    // match against.
+    char hardware_id[512] = {};
+    return SetupDiGetDeviceRegistryPropertyA(devs, const_cast<PSP_DEVINFO_DATA>(&dev) /* input-only */,
+                                             SPDRP_HARDWAREID, nullptr,
+                                             reinterpret_cast<PBYTE>(hardware_id),
+                                             sizeof(hardware_id) - 1, nullptr)
+               ? hardware_id : std::string{};
+}
+
+static AutoHKEY open_device_reg_key(HDEVINFO devs, const SP_DEVINFO_DATA& dev)
+{
+    return AutoHKEY(SetupDiOpenDevRegKey(devs, const_cast<PSP_DEVINFO_DATA>(&dev) /* input-only */,
+                                         DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_READ));
+}
+
+static std::string read_device_COM_port_name(HDEVINFO devs, const SP_DEVINFO_DATA& dev)
+{
+    const AutoHKEY key = open_device_reg_key(devs, dev);
+    if (!key) return {};
+
+    char port_name[32] = {};
+    DWORD size = sizeof(port_name) - 1;
+    DWORD type = 0;
+    const LSTATUS status = RegQueryValueExA(key.get(), "PortName", nullptr, &type,
+                                            reinterpret_cast<LPBYTE>(port_name), &size);
+
+    return (status == ERROR_SUCCESS && type == REG_SZ) ? port_name : std::string{};
+}
+
+static std::vector<std::string> enumerate_possibly_Arduino_COM_ports()
 {
     std::vector<std::string> ports;
 
-    HKEY key;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "HARDWARE\\DEVICEMAP\\SERIALCOMM", 0, KEY_READ, &key) != ERROR_SUCCESS)
+    const HDEVINFO devs = SetupDiGetClassDevsW(&GUID_DEVCLASS_PORTS, nullptr, nullptr, DIGCF_PRESENT);
+    if (devs == INVALID_HANDLE_VALUE) return ports;
+
+    SP_DEVINFO_DATA dev = { sizeof(SP_DEVINFO_DATA) };
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &dev); ++i)
     {
-        return ports;
+        if (!hardware_id_could_be_arduino(read_device_hardware_id(devs, dev))) continue;
+        if (auto port_name = read_device_COM_port_name(devs, dev); !port_name.empty())
+            ports.emplace_back(std::move(port_name));
     }
 
-    for (DWORD index = 0; ; ++index)
-    {
-        char value_name[256];
-        DWORD value_name_size = sizeof(value_name);
-        char data[256];
-        DWORD data_size = sizeof(data);
-        DWORD type;
-        if (RegEnumValueA(key, index, value_name, &value_name_size, nullptr,
-                          &type, reinterpret_cast<LPBYTE>(data), &data_size) != ERROR_SUCCESS)
-        {
-            break;
-        }
-        if (type == REG_SZ)
-        {
-            ports.emplace_back(data);
-        }
-    }
-
-    RegCloseKey(key);
+    SetupDiDestroyDeviceInfoList(devs);
     return ports;
 }
 
@@ -120,15 +171,25 @@ static void apply_9600_8N1(HANDLE port)
     if (!SetCommState(port, &dcb)) throw "SetCommState() failed.";
 }
 
-static void apply_short_read_timeouts(HANDLE port)
+static void apply_short_timeouts(HANDLE port)
 {
     COMMTIMEOUTS timeouts = { 0 };
     timeouts.ReadIntervalTimeout = 50;
     timeouts.ReadTotalTimeoutConstant = 50;
     timeouts.ReadTotalTimeoutMultiplier = 10;
+    timeouts.WriteTotalTimeoutConstant = 500;
+    timeouts.WriteTotalTimeoutMultiplier = 100;
     if (!SetCommTimeouts(port, &timeouts)) throw "SetCommTimeouts() failed.";
 }
 
+// XXX: hang risk. CreateFileW on a COM port, and the GetCommState/SetCommState/ SetCommTimeouts
+// IOCTLs called below, accept no caller-side timeout. A broken driver - a flaky CH340 clone driver
+// after suspend/resume, a half-removed Bluetooth port - could leave the worker thread blocked here
+// indefinitely, and the tooltip would sit at "Trying COMx." forever. The Win32 API has no
+// synchronous-timeout knob for these calls; the fix is to run try_open_COM_port (or just the
+// CreateFileW) on a watchdog thread, wait on it with WaitForSingleObject + a few-second timeout, and
+// detach/abandon it if it overruns. Worth doing only if this is actually observed in practice -
+// VID:PID filtering already keeps us off most strange devices.
 static AutoHANDLE try_open_COM_port(const std::string& port_name)
 {
     const std::wstring path = L"\\\\.\\" + std::wstring(port_name.begin(), port_name.end());
@@ -140,7 +201,7 @@ static AutoHANDLE try_open_COM_port(const std::string& port_name)
     try
     {
         apply_9600_8N1(port.get());
-        apply_short_read_timeouts(port.get());
+        apply_short_timeouts(port.get());
     }
     catch (const char*)
     {
@@ -173,7 +234,7 @@ static bool arduino_response_seen_in(const std::string& buffer)
 }
 
 // Opening the COM port pulses DTR, which resets the Arduino. The bootloader takes ~1-2 seconds before the sketch runs.
-static bool COM_port_appears_to_be_arduino(HANDLE port)
+static bool device_runs_brightness_and_volume_app(HANDLE port)
 {
     const auto deadline = GetTickCount64() + 3000 /*ms*/;
 
@@ -192,23 +253,26 @@ static bool COM_port_appears_to_be_arduino(HANDLE port)
     return false;
 }
 
+static void set_status_detail(const std::string& msg);  // defined further down once the tray state it touches is declared
+
 static AutoHANDLE open_COM_port(std::string& out_port_name)
 {
-    const auto port_names = enumerate_COM_ports();
-    if (port_names.empty()) throw "No COM ports were found.";
+    const auto port_names = enumerate_possibly_Arduino_COM_ports();
+    if (port_names.empty()) throw "No Arduino-like COM ports found.";
 
     for (const auto& port_name : port_names)
     {
+        set_status_detail("Trying " + port_name + ".");
         auto port = try_open_COM_port(port_name);
         if (port.get() == INVALID_HANDLE_VALUE) continue;
-        if (COM_port_appears_to_be_arduino(port.get()))
+        if (device_runs_brightness_and_volume_app(port.get()))
         {
             out_port_name = port_name;
             return port;
         }
     }
 
-    throw "Failed to find an Arduino on any COM port.";
+    throw "Failed to find an Arduino running the brightness and volume app on any COM port.";
 }
 
 namespace
@@ -222,6 +286,7 @@ namespace
 
     std::mutex tray_state_mutex;
     std::string connected_port_name;       // empty => not connected
+    std::string status_detail;             // tooltip's line 2 while not connected (e.g. "Trying COM4.")
     int last_brightness_percent = -1;      // -1 => not yet received
     int last_volume_percent = -1;
 
@@ -237,6 +302,15 @@ static void send_query_to_active_COM_port()
 {
     std::lock_guard lock(active_COM_port_mutex);
     if (active_COM_port != INVALID_HANDLE_VALUE) send_query(active_COM_port);
+}
+
+static void set_status_detail(const std::string& msg)
+{
+    {
+        std::lock_guard lock(tray_state_mutex);
+        status_detail = msg;
+    }
+    PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
 }
 
 struct ScopedActiveCOMPort
@@ -307,16 +381,17 @@ static std::wstring build_tooltip_text()
     std::wstring tip;
     if (connected_port_name.empty())
     {
-        tip = L"Not connected.";
+        tip = L"Not connected.\n";
+        tip.append(status_detail.begin(), status_detail.end());
     }
     else
     {
         tip.assign(connected_port_name.begin(), connected_port_name.end());
+        tip += L"\nBrightness: ";
+        tip += (last_brightness_percent < 0) ? L"-" : (std::to_wstring(last_brightness_percent) + L"%");
+        tip += L", Volume: ";
+        tip += (last_volume_percent < 0) ? L"-" : (std::to_wstring(last_volume_percent) + L"%");
     }
-    tip += L"\nBrightness: ";
-    tip += (last_brightness_percent < 0) ? L"-" : (std::to_wstring(last_brightness_percent) + L"%");
-    tip += L", Volume: ";
-    tip += (last_volume_percent < 0) ? L"-" : (std::to_wstring(last_volume_percent) + L"%");
     return tip;
 }
 
@@ -579,16 +654,15 @@ static void run_arduino_loop()
         {
             run_arduino_session();
         }
-        catch (const char*)
+        catch (const char* e)
         {
-            // XXX std::cerr << e << '\n';
+            {
+                std::lock_guard lock(tray_state_mutex);
+                connected_port_name.clear();
+                status_detail = e;
+            }
+            PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
         }
-
-        {
-            std::lock_guard lock(tray_state_mutex);
-            connected_port_name.clear();
-        }
-        PostMessageW(main_window, WM_APP_REFRESH_TOOLTIP, 0, 0);
 
         Sleep(2000);
     }
