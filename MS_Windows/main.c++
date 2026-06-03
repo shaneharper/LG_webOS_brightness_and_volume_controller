@@ -1,18 +1,18 @@
 // This program receives messages sent on a COM port from a device with a brightness knob and a volume knob and it forwards requests to change brightness/volume to "LGTV Companion" (https://github.com/JPersson77/LGTVCompanion).
 
+#include <cstdint>
 #include <cwchar>
 #include <mutex>
 #include <optional>
+#include <sal.h>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <windows.h>
-#include <setupapi.h>
-#include <devguid.h>
 #include <corecrt.h>
-#include <cstdint>
-#include <sal.h>
-#include <utility>
+#include <devguid.h>
+#include <setupapi.h>
 #pragma comment(lib, "setupapi.lib")
 
 
@@ -69,7 +69,6 @@ struct AutoHANDLE
     AutoHANDLE& operator=(const AutoHANDLE&) = delete;
 
     HANDLE get() const noexcept { return handle; }
-    //operator HANDLE() const noexcept { return handle; }
 
     std::optional<std::string> read(DWORD max_bytes_to_read = 128) const
     {
