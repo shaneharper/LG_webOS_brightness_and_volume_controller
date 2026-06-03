@@ -2,6 +2,7 @@
 
 #include <cwchar>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,6 +70,16 @@ struct AutoHANDLE
 
     HANDLE get() const noexcept { return handle; }
     //operator HANDLE() const noexcept { return handle; }
+
+    std::optional<std::string> read(DWORD max_bytes_to_read = 128) const
+    {
+        std::string result(max_bytes_to_read, '\0');
+        DWORD bytes_read;
+        if (!ReadFile(handle, result.data(), max_bytes_to_read, &bytes_read, nullptr))
+            return std::nullopt;
+        result.resize(bytes_read);
+        return result;
+    }
 
 private:
     HANDLE handle;
@@ -238,19 +249,18 @@ static bool arduino_response_seen_in(const std::string& buffer)
 }
 
 // Opening the COM port pulses DTR, which resets the Arduino. The bootloader takes ~1-2 seconds before the sketch runs.
-static bool device_runs_brightness_and_volume_app(HANDLE port)
+static bool device_runs_brightness_and_volume_app(const AutoHANDLE& port)
 {
     const auto deadline = GetTickCount64() + 3000 /*ms*/;
 
     std::string buffer;
     while (GetTickCount64() < deadline)
     {
-        send_query(port);
+        send_query(port.get());
 
-        char buf[128];
-        DWORD bytes_read;
-        if (!ReadFile(port, buf, sizeof(buf), &bytes_read, nullptr)) return false;
-        buffer.append(buf, bytes_read);
+        const auto s = port.read();
+        if (!s) return false;
+        buffer += *s;
 
         if (arduino_response_seen_in(buffer)) return true;
     }
@@ -269,7 +279,7 @@ static AutoHANDLE open_COM_port(std::string& out_port_name)
         set_status_detail("Trying " + port_name + ".");
         auto port = try_open_COM_port(port_name);
         if (port.get() == INVALID_HANDLE_VALUE) continue;
-        if (device_runs_brightness_and_volume_app(port.get()))
+        if (device_runs_brightness_and_volume_app(port))
         {
             out_port_name = port_name;
             return port;
@@ -586,16 +596,13 @@ static std::string read_line(const AutoHANDLE& COM_port)
 
     for (;; Sleep(10 /*ms*/))
     {
-        char buf[128];
-        DWORD bytes_read;
-
-        if (!ReadFile(COM_port.get(), buf, sizeof(buf), &bytes_read, nullptr))
+        const auto s = COM_port.read();
+        if (!s)
         {
             buffer.clear();
             throw "Arduino disconnected. Searching for it again...";
         }
-
-        buffer.append(buf, bytes_read);
+        buffer += *s;
         if (size_t pos = buffer.find('\n'); pos != std::string::npos)
         {
             std::string line = buffer.substr(0, pos);
