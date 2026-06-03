@@ -8,6 +8,10 @@
 #include <windows.h>
 #include <setupapi.h>
 #include <devguid.h>
+#include <corecrt.h>
+#include <cstdint>
+#include <sal.h>
+#include <utility>
 #pragma comment(lib, "setupapi.lib")
 
 
@@ -418,6 +422,7 @@ static HICON create_LG_icon()
     const int cy = GetSystemMetrics(SM_CYSMICON);
 
     HDC mem_dc = CreateCompatibleDC(nullptr);
+    if (!mem_dc) return nullptr;
 
     BITMAPINFO bmi = {};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -429,6 +434,11 @@ static HICON create_LG_icon()
 
     void* color_bits = nullptr;
     HBITMAP color_bitmap = CreateDIBSection(mem_dc, &bmi, DIB_RGB_COLORS, &color_bits, nullptr, 0);
+    if (!color_bitmap)
+    {
+        DeleteDC(mem_dc);
+        return nullptr;
+    }
     HBITMAP old_bitmap = static_cast<HBITMAP>(SelectObject(mem_dc, color_bitmap));
 
     HFONT font = CreateFontW(
@@ -456,7 +466,7 @@ static HICON create_LG_icon()
     for (int i = 0; i < cx * cy; ++i) pixels[i] |= 0xFF000000u;
 
     // 1bpp AND mask, all zero. With a 32bpp color bitmap the alpha channel governs blending.
-    const SIZE_T mask_stride = ((cx + 15) / 16) * 2;
+    const SIZE_T mask_stride = ((static_cast<SIZE_T>(cx) + 15) / 16) * 2;
     std::vector<BYTE> mask_bits(mask_stride * cy, 0);
     HBITMAP mask_bitmap = CreateBitmap(cx, cy, 1, 1, mask_bits.data());
 
