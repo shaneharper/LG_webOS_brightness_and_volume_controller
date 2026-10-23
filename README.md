@@ -1,4 +1,4 @@
-Analog inputs for brightness and for volume work really well. Forget having to repeatedly push `+`/`-` buttons to adjust a setting to the desired level. And forget having to navigate an onscreen settings menu to adjust the brightness (as was the case with my LG C2).
+Adjusting screen brightness and audio volume is super quick and easy with dedicated analogue knobs. Forget having to repeatedly push `+`/`-` buttons to adjust a setting to the desired level. And forget having to navigate an onscreen settings menu to adjust the brightness (as was the case with my LG C2).
 
 <img src="images/knobs.jpg" style="width:45%;">
 
